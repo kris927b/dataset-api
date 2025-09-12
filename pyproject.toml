@@ -21,6 +21,7 @@ dependencies = [
     "pydantic>=2.11.7",
     "pydantic-settings>=2.10.1",
     "structlog>=25.4.0",
+    "tqdm>=4.67.1",
     "uvicorn>=0.35.0",
     "vl-convert-python>=1.8.0",
     "watchdog>=6.0.0",

@@ -1,3 +1,4 @@
+import json
 from fastapi import APIRouter, HTTPException
 from ..models.analysis import (
     AnalysisRequest,
@@ -59,7 +60,7 @@ def run_preview_endpoint(request: AnalysisPreviewRequest):
                 created=sample["created"],
                 text=sample["text"],
                 token_count=sample["token_count"],
-                metadata=sample["metadata"] if "metadata" in sample else None,
+                metadata=json.dumps(sample["metadata"]) if "metadata" in sample else None,
             )
             preview.append(p)
 

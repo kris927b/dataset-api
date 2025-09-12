@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import List, Optional
 from datetime import datetime
 
+from tqdm import tqdm
+
 from ..core.config import settings
 from ..models.domain import (
     Dataset,
@@ -47,7 +49,7 @@ def scan_dataset(dataset_path: Path) -> Dataset:
                 # Get Schema and Row Count from metadata (fast)
                 dataset = pl.scan_parquet(parquet_file)
                 arrow_schema: pl.Schema = dataset.collect_schema()
-                row_count = dataset.collect().height
+                row_count = dataset.select(pl.len()).collect(engine="streaming").item()
 
                 file_schema = [
                     ColumnSchema(
@@ -94,8 +96,10 @@ def perform_scan() -> List[Dataset]:
         return []
 
     datasets = []
-    for dataset_dir in root_path.iterdir():
+    pbar = tqdm(root_path.iterdir(), desc="Reading dataset directory")
+    for dataset_dir in pbar:
         if dataset_dir.is_dir():
+            pbar.set_description_str(desc=f"Reading {dataset_dir.name}")
             datasets.append(scan_dataset(dataset_dir))
 
     return datasets
