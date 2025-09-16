@@ -1,17 +1,137 @@
+from multiprocessing.pool import Pool
 import polars as pl
 from collections import Counter
 from typing import Any, Dict
 import re
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
 
-pattern = re.compile(r"\b(\w+)\s+\1{4,}\b")
+from fastapi.logger import logger
 
-def repeated_word(text: str) -> int:
-    return 1 if pattern.search(text) else 0
-# -------------------
-# Phase 1 Checks
-# -------------------
+
+
+def detect_repeated_word(texts: list[str], workers=8) -> int:
+    pattern = re.compile(r"\b(\w+)\s+\1{4,}\b")
+    def repeated_word(text: str) -> int:
+        return 1 if pattern.search(text) else 0
+    
+    # parallelize
+    with Pool(workers) as p:
+        repeats = p.map(repeated_word, texts)
+
+    return sum(repeats)
+
+
+def detect_languages_sample(texts: list[str], workers=8):
+    def detect_lang(text: str) -> str:
+        from langdetect import detect
+
+        try:
+            lang = detect(text)
+            return lang
+        except Exception:
+            return "unknown"
+    # parallelize
+    with Pool(workers) as p:
+        langs = p.map(detect_lang, texts)
+
+    return dict(sorted(Counter(langs).items(), key=lambda x: x[1], reverse=True))
+
+
+def run_all_checks(df: pl.LazyFrame, token_count_col: str = "token_count", text_column: str = "text", sample_size: int = 10_000) -> Dict[str, Any]:
+
+    # Get column names for iteration
+    schema = df.collect_schema()
+    all_columns = schema.names()
+
+    total_rows = df.select(pl.len()).collect(engine="streaming").item()
+    
+    # Build expressions for all metrics in one go
+    expr = [
+        *(pl.col(col).null_count().alias(f"missing_{col}") for col in all_columns),
+        *(pl.col(col).n_unique().alias(f"unique_{col}") for col in all_columns),
+    ]
+    
+    # Encoding issues
+    expr.extend([
+        pl.col(text_column).str.count_matches("�").sum().alias(f"replacement_char"),
+        pl.col(text_column).str.count_matches(r"[ÃÂ][ -~]").sum().alias(f"mojibake"),
+        pl.col(text_column)
+        .str.count_matches(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
+        .sum()
+        .alias(f"control_chars"),
+    ])
+
+    # HTML/code/log detection
+    expr.extend([
+        pl.col(text_column).str.contains(r"<[^>]+>").sum().alias("html_like"),
+        pl.col(text_column).str.contains(r"[;{}]|\bif\b|\bfor\b").sum().alias("code_like"),
+        pl.col(text_column).str.contains(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}").sum().alias("log_like"),
+    ])
+
+    # Token stats
+    expr.extend([
+        pl.col(token_count_col).min().alias("min"),
+        pl.col(token_count_col).max().alias("max"),
+        pl.col(token_count_col).quantile(0.99).alias("p99"),
+        (pl.col(token_count_col) < 5).sum().alias("too_short"),
+        (pl.col(token_count_col) > 10_000).sum().alias("too_long"),
+        (pl.col(token_count_col) > pl.col(token_count_col).quantile(0.99)).sum().alias("above_p99"),
+    ])
+
+    expr.extend([
+        (pl.col(text_column).str.count_matches(r"[^A-Za-zÆØÅæøå]") / pl.col(text_column).str.len_chars())
+        .mean()
+        .alias("avg_non_alpha_ratio")
+    ])
+
+    # expr.append(pl.col(text_column).map_elements(repeated_word, return_dtype=pl.Int64).sum().alias("repetitions"))
+
+
+    # Execute all aggregations in one go
+    results = df.select(expr).collect(engine="streaming").to_dict(as_series=False)
+
+    texts = (
+        df.select(pl.col(text_column)
+        .sample(n=min(total_rows, sample_size), shuffle=True))
+        .collect()
+        .to_series()
+        .to_list()
+    )
+
+    # Execute lang_Detection
+    lang_dist = detect_languages_sample(texts, workers=8)
+
+    # Process results
+    output = {
+        "row_count": total_rows,
+        "missing_values": {col: int(results[f"missing_{col}"][0]) for col in all_columns},
+        "column_uniqueness": {
+            "id": total_rows - int(results["unique_id"][0]) if "id" in all_columns else 0,
+            "text": total_rows - int(results["unique_text"][0]),
+        },
+        "encoding_issues": {
+            "replacement_char": int(results["replacement_char"][0]),
+            "mojibake": int(results["mojibake"][0]),
+            "control_chars": int(results["control_chars"][0]),
+        },
+        "non_alpha_ratio": float(results["avg_non_alpha_ratio"][0]) if results["avg_non_alpha_ratio"][0] is not None else 0.0,
+        "html_code_log": {
+            "html_like": int(results["html_like"][0]),
+            # "code_like": int(results["code_like"][0]),
+            "log_like": int(results["log_like"][0]),
+        },
+        "token_outliers": {
+            "min_tokens": int(results["min"][0]) if results["min"][0] is not None else 0,
+            "max_tokens": int(results["max"][0]) if results["max"][0] is not None else 0,
+            "p99_tokens": int(results["p99"][0]),
+            "too_short": int(results["too_short"][0]),
+            "too_long": int(results["too_long"][0]),
+            "above_p99": int(results["above_p99"][0]),
+        },
+        "repetition": 0, # int(results["repetitions"][0]),
+        "lang_dist": lang_dist
+    }
+
+    return output
 
 
 def check_row_count(df: pl.LazyFrame) -> int:
@@ -33,15 +153,6 @@ def check_missing_values(df: pl.LazyFrame) -> Dict[str, int]:
         nulls = df.select(pl.col(col).null_count()).collect(engine="streaming").item()
         out[col] = nulls
     return out
-
-
-def check_duplicate_rows(df: pl.LazyFrame) -> int:
-    """
-    Count duplicate rows in dataset.
-    """
-    n_total = df.select(pl.count()).collect(engine="streaming").item()
-    n_unique = df.unique().select(pl.count()).collect(engine="streaming").item()
-    return n_total - n_unique
 
 
 def check_column_uniqueness(df: pl.LazyFrame) -> Dict[str, int]:
@@ -163,25 +274,6 @@ def check_html_or_code(df: pl.LazyFrame, text_col: str = "text") -> Dict[str, in
     ]
     out = df.select(exprs).collect(engine="streaming").to_dict(as_series=False)
     return {k: int(v[0]) for k, v in out.items()}
-
-
-# -----------------------------
-# Per-column Insights
-# -----------------------------
-
-def check_column_cardinality(df: pl.LazyFrame) -> Dict[str, Any]:
-    """
-    Compute cardinality (n_unique / total) per column.
-    """
-    n_rows = df.select(pl.count()).collect(engine="streaming").item()
-    results = {}
-    for col in df.columns:
-        n_unique = df.select(pl.col(col).n_unique()).collect(engine="streaming").item()
-        results[col] = {
-            "n_unique": int(n_unique),
-            "cardinality_ratio": n_unique / max(n_rows, 1),
-        }
-    return results
 
 
 # -----------------------------
