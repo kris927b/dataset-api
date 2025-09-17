@@ -10,7 +10,7 @@ class BasicCheckResponse(BaseModel):
     quality_grade: str
     token_outliers: dict[str, int]
     non_alpha_ratio: float
-    repetition: int
+    repetition: dict[str, int | float | tuple[int, int]]
     html_code_log: dict[str, int]
     lang_dist: dict[str, int]
 

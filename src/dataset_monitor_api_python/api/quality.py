@@ -1,8 +1,7 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 
 from ..models.quality import BasicCheckResponse, BasicCheckRequest
 from ..services import quality, analysis
-from pathlib import Path
 
 import polars as pl
 
@@ -37,9 +36,9 @@ def basic_check(request: BasicCheckRequest):
         results["encoding_issues"],
         results["token_outliers"],
         results["non_alpha_ratio"],
-        results["repetition"],
+        results["repetition"]["estimate_total"],
         results["html_code_log"],
-        results["lang_dist"]
+        results["lang_dist"],
     )
 
     response = BasicCheckResponse(
@@ -53,7 +52,7 @@ def basic_check(request: BasicCheckRequest):
         non_alpha_ratio=results["non_alpha_ratio"],
         repetition=results["repetition"],
         html_code_log=results["html_code_log"],
-        lang_dist=results["lang_dist"]
+        lang_dist=results["lang_dist"],
     )
 
     return response
