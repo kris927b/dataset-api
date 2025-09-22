@@ -28,7 +28,7 @@ def basic_check(request: BasicCheckRequest):
 
     results = quality.run_all_checks(lf)
 
-    quality_grade = quality.derive_quality_grade(
+    quality_score, quality_grade = quality.derive_quality_score_and_grade(
         results["row_count"],
         results["column_uniqueness"]["id"],
         results["column_uniqueness"]["text"],

@@ -229,72 +229,242 @@ def run_all_checks(
     return output
 
 
-def derive_quality_grade(
+def derive_quality_score_and_grade(
     total_rows: int,
     duplicate_ids: int,
     duplicate_texts: int,
-    missing_value_count: dict[str, int],
-    encoding_issues: dict[str, int],
-    token_outliers: dict[str, int],
+    missing_value_count: Dict[str, int],
+    encoding_issues: Dict[str, int],
+    token_outliers: Dict[str, int],
     non_alpha_ratio: float,
-    repetition: int,  # estimated total documents with repeating words
-    html_code_log: dict[str, int],
-    lang_dist: dict[str, int],
-) -> str:
-    grade = "Excellent"
+    repetition: int,
+    html_code_log: Dict[str, int],
+    lang_dist: Dict[str, int],
+) -> tuple[float, str]:
+    """
+    Calculate both a numeric quality score (0-100) and a grade.
 
-    # --- duplicates ---
+    Returns:
+        Tuple of (score, grade) where score is 0-100 and grade is one of:
+        "Excellent", "Good", "Fair", "Poor", "Needs Attention"
+    """
+    if total_rows == 0:
+        return 0.0, "Needs Attention"
+
+    # Initialize score at 100 and apply penalties
+    score = 100.0
+
+    # --- Duplicates (weight: high) ---
     dup_bad = duplicate_ids + duplicate_texts
-    if dup_bad / max(total_rows, 1) > 0.01:
-        return "Needs Attention"
-    elif dup_bad > 0:
-        grade = "Fair"
+    dup_rate = dup_bad / total_rows
+    if dup_rate > 0.05:  # More than 5%
+        score -= 30
+    elif dup_rate > 0.01:  # More than 1%
+        score -= 15
+    elif dup_rate > 0:
+        score -= 5
 
-    # --- missing values ---
+    # --- Missing Values (weight: medium-high) ---
+    max_missing_rate = 0
+    total_missing_penalty = 0
     for col, cnt in missing_value_count.items():
-        frac = cnt / max(total_rows, 1)
-        if frac > 0.10:
-            return "Needs Attention"
-        elif frac > 0.01:
-            grade = "Fair"
+        missing_rate = cnt / total_rows
+        max_missing_rate = max(max_missing_rate, missing_rate)
+        if missing_rate > 0.20:  # More than 20%
+            total_missing_penalty += 20
+        elif missing_rate > 0.10:  # More than 10%
+            total_missing_penalty += 10
+        elif missing_rate > 0.01:  # More than 1%
+            total_missing_penalty += 3
 
-    # --- encoding issues ---
+    score -= min(total_missing_penalty, 25)  # Cap missing value penalty
+
+    # --- Encoding Issues (weight: medium) ---
     encoding_total = sum(encoding_issues.values())
-    if encoding_total > 100:
-        return "Needs Attention"
+    encoding_rate = encoding_total / total_rows
+    if encoding_rate > 0.10:  # More than 10%
+        score -= 20
+    elif encoding_rate > 0.05:  # More than 5%
+        score -= 10
     elif encoding_total > 0:
-        grade = "Fair"
+        score -= min(encoding_total / 10, 8)  # Gradual penalty up to 8 points
 
-    # --- token outliers ---
-    if token_outliers.get("above_p99", 0) / max(total_rows, 1) > 0.02:
-        return "Needs Attention"
-    elif (
-        token_outliers.get("too_short", 0) > 0 or token_outliers.get("too_long", 0) > 0
-    ):
-        grade = "Fair"
+    # --- Token Outliers (weight: medium) ---
+    outlier_penalty = 0
+    above_p99_rate = token_outliers.get("above_p99", 0) / total_rows
+    if above_p99_rate > 0.05:
+        outlier_penalty += 15
+    elif above_p99_rate > 0.02:
+        outlier_penalty += 8
+    elif above_p99_rate > 0:
+        outlier_penalty += 3
 
-    # --- non-alpha ratio ---
-    if non_alpha_ratio > 0.50:  # more than half of chars are non-alpha
-        return "Needs Attention"
+    too_short = token_outliers.get("too_short", 0)
+    too_long = token_outliers.get("too_long", 0)
+    extreme_outlier_rate = (too_short + too_long) / total_rows
+    if extreme_outlier_rate > 0.05:
+        outlier_penalty += 10
+    elif extreme_outlier_rate > 0:
+        outlier_penalty += 5
+
+    score -= outlier_penalty
+
+    # --- Non-alpha Ratio (weight: medium) ---
+    if non_alpha_ratio > 0.70:
+        score -= 20
+    elif non_alpha_ratio > 0.50:
+        score -= 15
+    elif non_alpha_ratio > 0.30:
+        score -= 8
     elif non_alpha_ratio > 0.20:
-        grade = "Fair"
+        score -= 3
 
-    # --- repetition ---
-    if repetition / max(total_rows, 1) > 0.02:
-        return "Needs Attention"
+    # --- Repetition (weight: medium) ---
+    repetition_rate = repetition / total_rows
+    if repetition_rate > 0.10:
+        score -= 15
+    elif repetition_rate > 0.05:
+        score -= 10
+    elif repetition_rate > 0.02:
+        score -= 5
     elif repetition > 0:
-        grade = "Fair"
+        score -= 2
 
-    # --- html/code presence ---
+    # --- HTML/Code Presence (weight: low-medium) ---
     html_total = sum(html_code_log.values())
-    if html_total / max(total_rows, 1) > 0.05:
-        return "Needs Attention"
+    html_rate = html_total / total_rows
+    if html_rate > 0.20:
+        score -= 15
+    elif html_rate > 0.10:
+        score -= 10
+    elif html_rate > 0.05:
+        score -= 5
     elif html_total > 0:
-        grade = "Fair"
+        score -= 2
 
-    # --- language distribution ---
-    if len(lang_dist) > 1:  #  and max(lang_dist.values()) < 0.80:
-        # No dominant language, probably mixed content
-        grade = "Fair"
+    # --- Language Distribution (weight: low) ---
+    if len(lang_dist) > 1:
+        total_lang_docs = sum(lang_dist.values())
+        if total_lang_docs > 0:
+            # Calculate entropy-based penalty for language diversity
+            entropy = 0
+            for count in lang_dist.values():
+                if count > 0:
+                    p = count / total_lang_docs
+                    entropy -= p * math.log2(p)
 
-    return grade
+            # High entropy (many languages) gets more penalty
+            max_entropy = math.log2(len(lang_dist))
+            if max_entropy > 0:
+                diversity_ratio = entropy / max_entropy
+                if diversity_ratio > 0.8:  # Very mixed languages
+                    score -= 8
+                elif diversity_ratio > 0.6:
+                    score -= 5
+                elif diversity_ratio > 0.4:
+                    score -= 3
+
+    # Ensure score doesn't go below 0
+    score = max(0.0, score)
+
+    # Determine grade based on final score
+    if score >= 90:
+        grade = "Excellent"
+    elif score >= 80:
+        grade = "Good"
+    elif score >= 65:
+        grade = "Fair"
+    elif score >= 40:
+        grade = "Poor"
+    else:
+        grade = "Needs Attention"
+
+    return round(score, 1), grade
+
+
+def get_quality_insights(
+    score: float,
+    total_rows: int,
+    duplicate_ids: int,
+    duplicate_texts: int,
+    missing_value_count: Dict[str, int],
+    encoding_issues: Dict[str, int],
+    token_outliers: Dict[str, int],
+    non_alpha_ratio: float,
+    repetition: int,
+    html_code_log: Dict[str, int],
+    lang_dist: Dict[str, int],
+) -> Dict[str, Any]:
+    """
+    Provide detailed insights about what's affecting the quality score.
+    """
+    insights = {
+        "score": score,
+        "total_rows": total_rows,
+        "issues": [],
+        "strengths": [],
+        "recommendations": [],
+    }
+
+    if total_rows == 0:
+        insights["issues"].append("No data to analyze")
+        return insights
+
+    # Analyze each dimension
+    dup_rate = (duplicate_ids + duplicate_texts) / total_rows
+    if dup_rate > 0.01:
+        insights["issues"].append(
+            f"Duplicates: {dup_rate:.1%} of records are duplicated"
+        )
+        insights["recommendations"].append(
+            "Remove duplicate records to improve data quality"
+        )
+    elif dup_rate == 0:
+        insights["strengths"].append("No duplicate records found")
+
+    max_missing_rate = max(
+        [cnt / total_rows for cnt in missing_value_count.values()], default=0
+    )
+    if max_missing_rate > 0.10:
+        insights["issues"].append(
+            f"Missing values: Up to {max_missing_rate:.1%} missing in some columns"
+        )
+        insights["recommendations"].append(
+            "Address missing values through imputation or data collection"
+        )
+    elif max_missing_rate == 0:
+        insights["strengths"].append("No missing values detected")
+
+    encoding_rate = sum(encoding_issues.values()) / total_rows
+    if encoding_rate > 0.05:
+        insights["issues"].append(
+            f"Encoding issues: {encoding_rate:.1%} of records have encoding problems"
+        )
+        insights["recommendations"].append("Fix character encoding issues")
+
+    if non_alpha_ratio > 0.30:
+        insights["issues"].append(
+            f"Text quality: {non_alpha_ratio:.1%} non-alphabetic characters"
+        )
+        insights["recommendations"].append("Review and clean text content")
+    elif non_alpha_ratio < 0.10:
+        insights["strengths"].append("Good text quality with mostly alphabetic content")
+
+    repetition_rate = repetition / total_rows
+    if repetition_rate > 0.02:
+        insights["issues"].append(
+            f"Repetitive content: {repetition_rate:.1%} of documents have repetitive text"
+        )
+        insights["recommendations"].append("Review and deduplicate repetitive content")
+
+    if len(lang_dist) > 2:
+        insights["issues"].append(
+            f"Language consistency: {len(lang_dist)} different languages detected"
+        )
+        insights["recommendations"].append(
+            "Consider filtering or separating by language"
+        )
+    elif len(lang_dist) == 1:
+        insights["strengths"].append("Consistent language throughout dataset")
+
+    return insights
