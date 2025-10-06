@@ -1,15 +1,25 @@
 import polars as pl
 import altair as alt
+import hashlib
+import json
 from typing import Dict, Any, List
 from pathlib import Path
 from collections import defaultdict
 
 from ..models.analysis import AnalysisRequest, ColumnStats
 from ..services import indexing
+from ..core.cache import analysis_cache
 
 
-def get_parquet_file_path(dataset: str, variant: str, version: str) -> Path:
-    ds = indexing.get_dataset_by_slug(dataset)
+def compute_request_hash(request: AnalysisRequest) -> str:
+    """Compute a hash for the analysis request to use as cache key."""
+    request_dict = request.model_dump()
+    request_str = json.dumps(request_dict, sort_keys=True)
+    return hashlib.sha256(request_str.encode()).hexdigest()
+
+
+async def get_parquet_file_path(dataset: str, variant: str, version: str) -> Path:
+    ds = await indexing.get_dataset_by_slug(dataset)
     if not ds:
         raise ValueError("Dataset not found")
 

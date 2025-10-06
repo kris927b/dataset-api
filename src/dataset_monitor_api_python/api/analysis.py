@@ -7,6 +7,7 @@ from ..models.analysis import (
     AnalysisPreviewRequest,
 )
 from ..services import analysis
+from ..core.cache import analysis_cache
 from pathlib import Path
 
 import polars as pl
@@ -15,16 +16,29 @@ router = APIRouter()
 
 
 @router.post("/run", response_model=AnalysisResult)
-def run_analysis_endpoint(request: AnalysisRequest):
+async def run_analysis_endpoint(request: AnalysisRequest):
     try:
-        file_path = analysis.get_parquet_file_path(
+        # Compute cache key
+        cache_key = analysis.compute_request_hash(request)
+
+        # Check cache first
+        cached_result = await analysis_cache.get(cache_key)
+        if cached_result:
+            return cached_result
+
+        file_path = await analysis.get_parquet_file_path(
             request.dataset, request.variant, request.version
         )
         if not file_path.exists():
             raise HTTPException(status_code=404, detail="Parquet file not found")
 
         stats = analysis.run_analysis_on_file(file_path, request.operations)
-        return AnalysisResult(columns=stats)
+        result = AnalysisResult(columns=stats)
+
+        # Cache the result
+        await analysis_cache.set(cache_key, result)
+
+        return result
 
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -34,10 +48,19 @@ def run_analysis_endpoint(request: AnalysisRequest):
         )
 
 
+@router.get("/cache/{cache_key}", response_model=AnalysisResult)
+async def get_cached_analysis(cache_key: str):
+    """Fetch a cached analysis result by its key."""
+    cached_result = await analysis_cache.get(cache_key)
+    if cached_result is None:
+        raise HTTPException(status_code=404, detail="Cached result not found or expired")
+    return cached_result
+
+
 @router.post("/preview", response_model=list[AnalysisPreviewResult])
-def run_preview_endpoint(request: AnalysisPreviewRequest):
+async def run_preview_endpoint(request: AnalysisPreviewRequest):
     try:
-        file_path = analysis.get_parquet_file_path(
+        file_path = await analysis.get_parquet_file_path(
             request.dataset, request.variant, request.version
         )
         if not file_path.exists():

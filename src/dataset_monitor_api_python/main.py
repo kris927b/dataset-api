@@ -1,20 +1,34 @@
 from fastapi import FastAPI, APIRouter, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+import asyncio
 from .core.config import settings
 from .api import datasets, analysis, plots, quality
 from .services import indexing, health
+from .core.cache import analysis_cache
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # On startup
     print("Scanning filesystem and populating cache...")
-    indexing.populate_cache()
+    await indexing.populate_cache()
     print("Cache populated.")
+
+    # Start background task for cache cleanup
+    cleanup_task = asyncio.create_task(cache_cleanup_worker())
+
     yield
     # On shutdown
+    cleanup_task.cancel()
     print("Application shutting down.")
+
+
+async def cache_cleanup_worker():
+    """Background worker to periodically clean up expired cache entries."""
+    while True:
+        await asyncio.sleep(300)  # Clean up every 5 minutes
+        await analysis_cache.cleanup_expired()
 
 
 app = FastAPI(

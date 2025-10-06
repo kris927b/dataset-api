@@ -7,6 +7,7 @@ from datetime import datetime
 from tqdm import tqdm
 
 from ..core.config import settings
+from ..core.cache import Cache
 from ..models.domain import (
     Dataset,
     DatasetVariant,
@@ -16,7 +17,7 @@ from ..models.domain import (
 )
 
 # Module-level cache
-_cache: List[Dataset] = []
+_cache = Cache(ttl_seconds=None)  # No expiration for datasets
 
 
 def scan_dataset(dataset_path: Path) -> Dataset:
@@ -105,20 +106,19 @@ def perform_scan() -> List[Dataset]:
     return datasets
 
 
-def populate_cache():
+async def populate_cache():
     """Scans the filesystem and populates the in-memory cache."""
-    global _cache
-    _cache = perform_scan()
+    datasets = perform_scan()
+    for dataset in datasets:
+        await _cache.set(dataset.slug, dataset)
 
 
-def get_all_datasets() -> List[Dataset]:
+async def get_all_datasets() -> List[Dataset]:
     """Returns all datasets from the cache."""
-    return _cache
+    # Since no expiration, all are valid
+    return [value for value, _ in _cache._cache.values()]
 
 
-def get_dataset_by_slug(slug: str) -> Optional[Dataset]:
+async def get_dataset_by_slug(slug: str) -> Optional[Dataset]:
     """Finds a dataset by its slug in the cache."""
-    for dataset in _cache:
-        if dataset.slug == slug:
-            return dataset
-    return None
+    return await _cache.get(slug)

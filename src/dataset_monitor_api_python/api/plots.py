@@ -8,7 +8,7 @@ router = APIRouter()
 
 
 @router.post("/", response_model=Dict[str, Any], tags=["Plots"])
-def generate_plot_endpoint(request: AnalysisRequest):
+async def generate_plot_endpoint(request: AnalysisRequest):
     """
     Generates a Vega-Lite JSON specification for a single plot operation.
     """
@@ -19,7 +19,7 @@ def generate_plot_endpoint(request: AnalysisRequest):
     operation = request.operations[0]
 
     try:
-        file_path = analysis.get_parquet_file_path(
+        file_path = await analysis.get_parquet_file_path(
             request.dataset, request.variant, request.version
         )
         if not file_path.exists():

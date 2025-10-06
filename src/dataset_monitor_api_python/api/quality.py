@@ -2,15 +2,33 @@ from fastapi import APIRouter
 
 from ..models.quality import BasicCheckResponse, BasicCheckRequest
 from ..services import quality, analysis
+from ..core.cache import analysis_cache
+import hashlib
+import json
 
 import polars as pl
 
 router = APIRouter()
 
 
+def compute_quality_request_hash(request: BasicCheckRequest) -> str:
+    """Compute a hash for the quality check request to use as cache key."""
+    request_dict = request.model_dump()
+    request_str = json.dumps(request_dict, sort_keys=True)
+    return hashlib.sha256(request_str.encode()).hexdigest()
+
+
 @router.post("/basic", response_model=BasicCheckResponse)
-def basic_check(request: BasicCheckRequest):
-    parquet_path = analysis.get_parquet_file_path(
+async def basic_check(request: BasicCheckRequest):
+    # Compute cache key
+    cache_key = compute_quality_request_hash(request)
+
+    # Check cache first
+    cached_result = await analysis_cache.get(cache_key)
+    if cached_result:
+        return cached_result
+
+    parquet_path = await analysis.get_parquet_file_path(
         request.dataset, request.variant, request.version
     )
 
@@ -54,5 +72,8 @@ def basic_check(request: BasicCheckRequest):
         html_code_log=results["html_code_log"],
         lang_dist=results["lang_dist"],
     )
+
+    # Cache the result
+    await analysis_cache.set(cache_key, response)
 
     return response
